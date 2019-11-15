@@ -1,4 +1,5 @@
-// Package v1alpha1 contains API Schema definitions for the cnat v1alpha1 API group
-// +k8s:deepcopy-gen=package,register
+// +k8s:deepcopy-gen=package
 // +groupName=cnat.programming-kubernetes.info
+
+// Package v1alpha1 is the v1alpha1 version of the API.
 package v1alpha1
