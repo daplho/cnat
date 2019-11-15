@@ -2,9 +2,12 @@ package main
 
 import (
 	"flag"
+	"os"
 	"path/filepath"
+	"time"
 
-	kubeinfomers "k8s.io/client-go/informers"
+	"k8s.io/apimachinery/pkg/util/wait"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"

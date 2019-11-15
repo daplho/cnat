@@ -1,19 +1,3 @@
-/*
-Copyright 2017 The Kubernetes Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package main
 
 import (
@@ -28,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	corev1informer "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	corev1lister "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -236,7 +221,7 @@ func (c *Controller) processNextWorkItem() bool {
 // converge the two. It then updates the Status block of the At resource
 // with the current status of the resource. It returns how long to wait
 // until the schedule is due.
-func (c *Controller) syncHandler(key string) error {
+func (c *Controller) syncHandler(key string) (time.Duration, error) {
 	klog.Infof("=== Reconciling At %s", key)
 
 	// Convert the namespace/name string into a distinct namespace and name
@@ -251,20 +236,19 @@ func (c *Controller) syncHandler(key string) error {
 	if err != nil {
 		// The At resource may no longer exist, in which case we stop processing.
 		if errors.IsNotFound(err) {
-			utilruntime.HandleError(fmt.Errorf(
-				"at '%s' in work queue no longer exists", key
-			))
+			utilruntime.HandleError(
+				fmt.Errorf("at '%s' in work queue no longer exists", key))
 			return time.Duration(0), nil
 		}
 		return time.Duration(0), err
 	}
-	
+
 	// Clone because the original object is owned by the lister.
 	instance := original.DeepCopy()
 
 	// If no phase set, default to pending (the initial phase):
 	if instance.Status.Phase == "" {
-		instance.Status.Phase = cnatv1slpha1.PhasePending
+		instance.Status.Phase = cnatv1alpha1.PhasePending
 	}
 
 	// Now let's make the main case distinction: implementing
@@ -300,7 +284,7 @@ func (c *Controller) syncHandler(key string) error {
 		owner := metav1.NewControllerRef(
 			instance, cnatv1alpha1.SchemeGroupVersion.WithKind("At"),
 		)
-		pod.ObjectMeta.OwnerReference = append(pod.ObjectMeta.OwnerReferences, *owner)
+		pod.ObjectMeta.OwnerReferences = append(pod.ObjectMeta.OwnerReferences, *owner)
 
 		// Try to see if the pod already exists and if not
 		// (which we expect) then create a one-shot pod as per spec:
@@ -314,7 +298,7 @@ func (c *Controller) syncHandler(key string) error {
 			klog.Infof("instance %s: pod launched: name=%s", key, pod.Name)
 		} else if err != nil {
 			// requeue with error
-			return time.Duration(0)
+			return time.Duration(0), err
 		} else if found.Status.Phase == corev1.PodFailed ||
 			found.Status.Phase == corev1.PodSucceeded {
 			klog.Infof(
@@ -345,6 +329,54 @@ func (c *Controller) syncHandler(key string) error {
 	// Don't requeue. We should reconcile because either the pod or
 	// the CR changes.
 	return time.Duration(0), nil
+}
+
+// enqueueAt takes an At resource and converts it into a namespace/name
+// string which is then put onto the workqueue. This method should not be
+// passed resources of any type other than At.
+func (c *Controller) enqueueAt(obj interface{}) {
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.workqueue.Add(key)
+}
+
+// enqueue a pod and checks that the owner reference points to an At object.
+// It then enqueues this At object.
+func (c *Controller) enqueuePod(obj interface{}) {
+	var pod *corev1.Pod
+	var ok bool
+	if pod, ok = obj.(*corev1.Pod); !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			utilruntime.HandleError(fmt.Errorf("error decoding pod, invalid type"))
+			return
+		}
+		pod, ok = tombstone.Obj.(*corev1.Pod)
+		if !ok {
+			utilruntime.HandleError(
+				fmt.Errorf("error decoding pod tombstone, invalid type"))
+			return
+		}
+		klog.V(4).Infof("Recovered deleted po '%s' from tombstone", pod.GetName())
+	}
+	if ownerRef := metav1.GetControllerOf(pod); ownerRef != nil {
+		if ownerRef.Kind != "At" {
+			return
+		}
+
+		at, err := c.atLister.Ats(pod.GetNamespace()).Get(ownerRef.Name)
+		if err != nil {
+			klog.V(4).Infof("ignoring orphaned pod '%s' of At '%s'",
+				pod.GetSelfLink(), ownerRef.Name)
+			return
+		}
+		klog.Infof("enqueueing At %s/%s because pod changed", at.Namespace, at.Name)
+		c.enqueueAt(at)
+	}
 }
 
 func newPodForCR(cr *cnatv1alpha1.At) *corev1.Pod {
